@@ -171,7 +171,7 @@ class NiftiToNrrdConverter(QWidget):
         viewer.clear()
         middle_index = volume.shape[0] // 2
         viewer.setImage(volume, xvals=np.arange(volume.shape[0]))
-        viewer.setCurrentIndex(middle_index)
+        viewer.setCurrentIndex(middle_index) 
 
         # Plot central line
         slice_img = volume[middle_index]
