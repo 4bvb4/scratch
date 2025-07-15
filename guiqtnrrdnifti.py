@@ -1,3 +1,5 @@
+
+
 import sys
 import os
 import numpy as np
@@ -25,21 +27,24 @@ class NiftiToNrrdConverter(QWidget):
         self.header = None
 
         self.nrrd_data = None
+        self.nrrd_mask = None
         self.nifti_data = None
         self.roi_data = None
+        
+        # Last used paths
+        self.last_nrrd_path = ""
+        self.last_nifti_path = ""
+        self.last_roi_path = ""
+        
 
-        self.transpose_state = 0  # (0, 1, 2)
-
-        # To hold overlay items
-        self.nrrd_overlay = None
-        self.nifti_overlay = None
+        self.transpose_state = 0  # (0, 1, 2) cycles
 
         self.init_ui()
 
     def init_ui(self):
         main_layout = QVBoxLayout(self)
 
-        # --- Control Panel ---
+        # --- Control panel ---
         control_layout = QHBoxLayout()
         self.nrrd_label = QLabel("No NRRD file")
         self.nifti_label = QLabel("No NIfTI file")
@@ -71,7 +76,7 @@ class NiftiToNrrdConverter(QWidget):
 
         main_layout.addLayout(control_layout)
 
-        # --- Viewers and Plots ---
+        # --- Splitters for resizable layout ---
         self.splitter_main = QSplitter(Qt.Vertical)
         self.splitter_top = QSplitter(Qt.Horizontal)
         self.splitter_bottom = QSplitter(Qt.Horizontal)
@@ -88,40 +93,44 @@ class NiftiToNrrdConverter(QWidget):
 
         self.splitter_main.addWidget(self.splitter_top)
         self.splitter_main.addWidget(self.splitter_bottom)
+
         main_layout.addWidget(self.splitter_main)
 
-        # Connect slice scroll events
-        self.nrrd_viewer.timeLine.sigPositionChanged.connect(self.update_nrrd_overlay_slice)
-        self.nifti_viewer.timeLine.sigPositionChanged.connect(self.update_nifti_overlay_slice)
-
     def select_nrrd_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select NRRD File", "", "NRRD files (*.nrrd)")
+        start_path = self.last_nrrd_path or ""
+        path, _ = QFileDialog.getOpenFileName(self, "Select NRRD File", start_path, "NRRD files (*.nrrd)")
         if path:
+            self.last_nrrd_path = path
             self.nrrd_file = path
             self.nrrd_label.setText(f"NRRD: {os.path.basename(path)}")
             self.nrrd_data, self.header = nrrd.read(path)
+            self.nrrd_mask = np.array(self.nrrd_data)
+            self.nrrd_mask = (self.nrrd_data>np.max(self.nrrd_data/100))*1.
             self.update_views()
 
     def select_nifti_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select NIfTI File", "", "NIfTI files (*.nii *.nii.gz)")
+        start_path = self.last_nifti_path or ""
+        path, _ = QFileDialog.getOpenFileName(self, "Select NIfTI File", start_path, "NIfTI files (*.nii *.nii.gz)")
         if path:
+            self.last_nifti_path = path
             self.nifti_file = path
             self.nifti_label.setText(f"NIfTI: {os.path.basename(path)}")
             g = nib.load(path).get_fdata()
             self.nifti_data = np.transpose(np.transpose(g, [2, 0, 1])[:, :, ::-1])
             self.update_views()
+            
 
     def select_roi_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select ROI NRRD File", "", "NRRD files (*.nrrd)")
+        start_path = self.last_roi_path or ""
+        path, _ = QFileDialog.getOpenFileName(self, "Select ROI NRRD File", start_path, "NRRD files (*.nrrd)")
         if path:
+            self.last_roi_path = path
             self.roi_file = path
             self.roi_label.setText(f"ROI: {os.path.basename(path)}")
-            try:
-                roi_data, _ = nrrd.read(path)
-                self.roi_data = roi_data.astype(np.uint8)
-                self.update_views()
-            except Exception as e:
-                QMessageBox.critical(self, "Error reading ROI", str(e))
+            roi_data, _ = nrrd.read(path)
+            self.roi_data = roi_data.astype(np.uint8)
+            self.update_views()
+
 
     def clear_roi(self):
         self.roi_data = None
@@ -139,67 +148,61 @@ class NiftiToNrrdConverter(QWidget):
         elif self.transpose_state == 2:
             return np.transpose(data, (2, 0, 1))
 
-    def get_overlay_image(self, roi_volume, index):
-        overlay = np.zeros((*roi_volume.shape[1:], 4), dtype=np.uint8)
-        if index >= roi_volume.shape[0]:
-            return overlay
-        slice_roi = roi_volume[index]
+    def get_overlay_image(self, base, roi):
+        """
+        Create an RGBA overlay image.
+        """
+        overlay = np.zeros((*roi.shape, 4), dtype=np.uint8)
         overlay[..., 0] = 255       # Red
-        overlay[..., 3] = slice_roi * 100
+        overlay[..., 3] = (roi>roi.max()/2+10) * 100  # Transparency mask
         return overlay
 
     def update_views(self):
+        # Handle orientation
         if self.nrrd_data is not None:
-            vol = self.apply_orientation(self.nrrd_data)
-            self.nrrd_viewer.setImage(vol, xvals=np.arange(vol.shape[0]))
-            self.update_nrrd_overlay_slice()
-            mid_idx = vol.shape[0] // 2
-            slice_img = vol[mid_idx]
-            central_line = slice_img[slice_img.shape[0] // 2, :]
-            self.nrrd_plot.clear()
-            self.nrrd_plot.plot(central_line, pen='b')
+            nrrd_vol = self.apply_orientation(self.nrrd_data)
+            self.show_image_with_overlay(self.nrrd_viewer, np.transpose(nrrd_vol), self.roi_data, "nrrd")
 
         if self.nifti_data is not None:
-            vol = self.apply_orientation(self.nifti_data)
-            self.nifti_viewer.setImage(vol, xvals=np.arange(vol.shape[0]))
-            self.update_nifti_overlay_slice()
-            mid_idx = vol.shape[0] // 2
-            slice_img = vol[mid_idx]
-            central_line = slice_img[slice_img.shape[0] // 2, :]
+            nifti_vol = self.apply_orientation(self.nifti_data)
+            self.show_image_with_overlay(self.nifti_viewer, np.transpose(nifti_vol), self.roi_data, "nifti")
+
+    def show_image_with_overlay(self, viewer, volume, roi, tag):
+        viewer.clear()
+        middle_index = volume.shape[0] // 2
+        viewer.setImage(volume, xvals=np.arange(volume.shape[0]))
+        viewer.setCurrentIndex(middle_index)
+
+        # Plot central line
+        slice_img = volume[middle_index]
+        central_line = slice_img[slice_img.shape[0] // 2, :]
+
+        if tag == "nrrd":
+            self.nrrd_plot.clear()
+            self.nrrd_plot.plot(central_line, pen='b')
+        elif tag == "nifti":
             self.nifti_plot.clear()
             self.nifti_plot.plot(central_line, pen='r')
 
-    def update_nrrd_overlay_slice(self):
-        if self.roi_data is None:
-            return
-        if self.nrrd_overlay:
-            self.nrrd_viewer.view.removeItem(self.nrrd_overlay)
-        roi_vol = self.apply_orientation(self.roi_data)
-        slice_idx = int(round(self.nrrd_viewer.currentIndex))
-        overlay_img = self.get_overlay_image(roi_vol, slice_idx)
-        self.nrrd_overlay = pg.ImageItem(overlay_img)
-        self.nrrd_viewer.view.addItem(self.nrrd_overlay)
-
-    def update_nifti_overlay_slice(self):
-        if self.roi_data is None:
-            return
-        if self.nifti_overlay:
-            self.nifti_viewer.view.removeItem(self.nifti_overlay)
-        roi_vol = self.apply_orientation(self.roi_data)
-        slice_idx = int(round(self.nifti_viewer.currentIndex))
-        overlay_img = self.get_overlay_image(roi_vol, slice_idx)
-        self.nifti_overlay = pg.ImageItem(overlay_img)
-        self.nifti_viewer.view.addItem(self.nifti_overlay)
+        # Overlay ROI
+        if roi is not None:
+            try:
+                roi_oriented = self.apply_orientation(roi)
+                overlay = self.get_overlay_image(volume, roi_oriented)
+                viewer.addItem(pg.ImageItem(overlay[middle_index]))
+            except Exception as e:
+                QMessageBox.warning(self, "ROI Overlay Error", str(e))
 
     def convert_and_save(self):
         if self.header is None or self.nifti_data is None:
             QMessageBox.warning(self, "Missing Data", "Load both NRRD and NIfTI files first.")
             return
+
         try:
             base_dir = os.path.dirname(self.nrrd_file)
             suggested_path = os.path.join(base_dir, "newfile.nrrd")
-            nrrd.write(suggested_path, self.nifti_data, self.header)
-            QMessageBox.information(self, "Saved", f"Saved as:\n{suggested_path}")
+            nrrd.write(suggested_path, self.nrrd_mask*self.nifti_data, self.header)
+            QMessageBox.information(self, "Success", f"Saved NRRD to:\n{suggested_path}")
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
 
